@@ -107,14 +107,23 @@ class PlejdMesh:
         if not self.connected:
             return False
 
+        client = self._client
         try:
-            await self._client.stop_notify(gatt.PLEJD_LASTDATA)
-            await self._client.stop_notify(gatt.PLEJD_LIGHTLEVEL)
-            await self._client.disconnect()
+            await client.stop_notify(gatt.PLEJD_LASTDATA)
+            await client.stop_notify(gatt.PLEJD_LIGHTLEVEL)
+            await client.disconnect()
         except BleakError:
             pass
 
+        if self._client is client:
+            self._connection_lost()
+
+    def _connection_lost(self):
         self._client = None
+        if self._gateway_node:
+            self._gateway_node.is_gateway = False
+            self._gateway_node.update()
+            self._gateway_node = None
         self.manager.connect_callback(False)
 
     async def connect(self):
@@ -124,12 +133,10 @@ class PlejdMesh:
 
         def _disconnect(client: BleakClient):
             _CONNECTION_LOG.debug("Disconected from BLE mesh (%s)", client)
-            self._client = None
-            if self._gateway_node:
-                self._gateway_node.is_gateway = False
-                self._gateway_node.update()
-                self._gateway_node = None
-            self.manager.connect_callback(False)
+            # Nodes rejected during connect() also end up here, possibly after
+            # a later node has been accepted. Only the active client counts.
+            if client is self._client:
+                self._connection_lost()
 
         # Try to connect to nodes in order of decreasing RSSI
         filtered_nodes = filter(
@@ -148,6 +155,7 @@ class PlejdMesh:
                     BleakClientWithServiceCache,
                     node.bleDevice,
                     node.bleDevice.name,
+                    disconnected_callback=_disconnect,
                     max_attempts=2,
                 )
 
@@ -220,11 +228,24 @@ class PlejdMesh:
             if not await self.connect():
                 return False
             if not await self._ping(self._client):
+                await self._drop_client()
                 return False
 
         await self.poll()
         await self.poll_buttons()
         return True
+
+    async def _drop_client(self):
+        # A failed keepalive means the link is dead, even if the disconnect
+        # event never arrived. Drop it so the next attempt really reconnects.
+        client = self._client
+        if client is None:
+            return
+        self._connection_lost()
+        try:
+            await client.disconnect()
+        except (BleakError, asyncio.TimeoutError):
+            pass
 
     async def poll_time(self, address: int):
         if not self.connected:
@@ -233,8 +254,12 @@ class PlejdMesh:
         payloads = payload_encode.request_time(self, address)
         await self.write(payloads)
 
-        retval = await self._client.read_gatt_char(gatt.PLEJD_LASTDATA)
-        data = encrypt_decrypt(self._crypto_key, self._gateway_node.BLEaddress, retval)
+        client, gateway_node = self._client, self._gateway_node
+        if client is None:
+            return
+
+        retval = await client.read_gatt_char(gatt.PLEJD_LASTDATA)
+        data = encrypt_decrypt(self._crypto_key, gateway_node.BLEaddress, retval)
         ts = int.from_bytes(data[5:9], "little")
         dt = datetime.fromtimestamp(ts)
 
@@ -269,9 +294,12 @@ class PlejdMesh:
 
         try:
             async with self._ble_lock:
+                client = self._client
+                if client is None:
+                    return False
                 for payload in payloads:
                     _LOGGER.debug("Writing to plejd mesh: %s", payload.hex())
-                    await self._client.write_gatt_char(
+                    await client.write_gatt_char(
                         gatt.PLEJD_DATA, payload, response=True
                     )
         except (BleakError, asyncio.TimeoutError) as e:
