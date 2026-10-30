@@ -40,7 +40,7 @@ class PlejdMotionSensor(PlejdInput):
                 )
                 cmd.command_type = LastData.CMDT_READ
                 rec_log(f"Write {cmd.hex}", self.address)
-                await self._mesh.write(cmd.hex)
+                await self._mesh.try_write(cmd.hex)
             case _:
                 if data.address in [self.address, self.rxAddress]:
                     rec_log(f"Unknown command received: {data.command}", self.address)

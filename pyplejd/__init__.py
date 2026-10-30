@@ -9,7 +9,7 @@ from .ble import PlejdMesh, PLEJD_SERVICE, LastData, LightLevel
 from .ble.debug import rec_log
 from .cloud import PlejdCloudSite
 
-from .errors import AuthenticationError, ConnectionError
+from .errors import AuthenticationError, ConnectionError, WriteError
 from .interface import (
     outputDeviceClass,
     inputDeviceClass,
@@ -24,6 +24,7 @@ __all__ = [
     "DeviceTypes",
     "AuthenticationError",
     "ConnectionError",
+    "WriteError",
     "PLEJD_SERVICE",
 ]
 

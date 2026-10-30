@@ -10,6 +10,7 @@ from bleak import BleakClient, BleakError
 from bleak.backends.device import BLEDevice
 from bleak_retry_connector import establish_connection, BleakClientWithServiceCache
 
+from ..errors import WriteError
 from .crypto import auth_response, encrypt_decrypt
 from . import ble_characteristics as gatt
 from . import payload_encode
@@ -202,8 +203,20 @@ class PlejdMesh:
             rec_log(f"lightlevel {lightlevel}")
             await self.manager.lightlevel_callback(parse_lightlevels(lightlevel))
 
-        await client.start_notify(gatt.PLEJD_LASTDATA, _lastdata_listener)
-        await client.start_notify(gatt.PLEJD_LIGHTLEVEL, _lightlevel_listener)
+        try:
+            await client.start_notify(gatt.PLEJD_LASTDATA, _lastdata_listener)
+            await client.start_notify(gatt.PLEJD_LIGHTLEVEL, _lightlevel_listener)
+        except (BleakError, asyncio.TimeoutError) as e:
+            _CONNECTION_LOG.warning("Failed to start notifications: %s", str(e))
+            self._gateway_node.is_gateway = False
+            self._gateway_node.update()
+            self._gateway_node = None
+            try:
+                await client.disconnect()
+            except (BleakError, asyncio.TimeoutError):
+                pass
+            return False
+
         self._client = client
 
         self.manager.connect_callback(True)
@@ -221,7 +234,7 @@ class PlejdMesh:
         )
 
     async def poll_buttons(self):
-        await self.write(LastData(command=LastData.CMD_EVENT_PREPARE).hex)
+        await self.try_write(LastData(command=LastData.CMD_EVENT_PREPARE).hex)
 
     async def ping(self):
         async with self._ble_lock:
@@ -252,7 +265,7 @@ class PlejdMesh:
             return
 
         payloads = payload_encode.request_time(self, address)
-        await self.write(payloads)
+        await self.try_write(payloads)
 
         client, gateway_node = self._client, self._gateway_node
         if client is None:
@@ -271,11 +284,15 @@ class PlejdMesh:
 
     async def broadcast_time(self):
         payloads = payload_encode.set_time(self)
-        await self.write(payloads)
+        await self.try_write(payloads)
 
     async def write(self, *payloads: list[str]):
+        if not await self.try_write(*payloads):
+            raise WriteError("Command did not reach the Plejd mesh")
+
+    async def try_write(self, *payloads: list[str]) -> bool:
         if not self.connected:
-            return
+            return False
 
         pl = [
             encrypt_decrypt(
@@ -286,11 +303,11 @@ class PlejdMesh:
             for payload in payloads
         ]
         _LOGGER.debug(f"Write: {payloads}")
-        await self._write(pl)
+        return await self._write(pl)
 
     async def _write(self, payloads):
         if not self.connected:
-            return
+            return False
 
         try:
             async with self._ble_lock:
